@@ -5,23 +5,23 @@ Smart Sweet-Spot Sleep & Mouse-Linked Pre-Wake Daemon for macOS.
 
 Root-Cause Findings from macOS bluetoothd & IOKit Telemetry:
   1. Factory Deep Sleep (STATUS 719): Mi PTKB terminates its BLE connection after ~150s (2m38s)
-     of zero traffic. Once disconnected, macOS bluetoothd only runs LeConnectionScanHigh
-     (100% duty cycle, 30ms/30ms) for 6.0 seconds before FastConnectionScanTimer expires.
+     of idle. Empirical 7-hour testing proved that a 35s pulse interval is too wide to prevent
+     the firmware's sleep state machine from advancing, whereas an <= 8.0s synchronous GATT
+     Output Report pulse keeps the keyboard 100% connected for hours without a single drop.
   2. Factory Shallow Sleep (Peripheral Latency = 22): Within 1~3s of no keystrokes,
-     BLE RTT jumps from ~29ms to 215ms~585ms.
+     BLE RTT jumps from ~29ms to 215ms~642ms.
   3. Over-the-Air GATT Reset: Synchronous IOHIDDeviceGetReport(Output, ID=1) +
      IOHIDDeviceSetReport(Output, ID=1) toggles bit 4 (Kana LED, which has no physical LED
      on the 85-key Mi PTKB) and restores the exact CapsLock state, forcing an over-the-air
-     ATT_READ_REQ/RSP + ATT_WRITE_REQ/RSP transaction that resets both the 150s deep-sleep
-     timer and the shallow-sleep slave latency.
+     ATT_READ_REQ/RSP + ATT_WRITE_REQ/RSP transaction.
 
-Three-Tier Power-Budgeted State Machine (within 2x Battery Budget):
+Three-Tier Power-Budgeted State Machine:
   - Tier 1 [HOT / PRE-WAKE] (key_idle < 15s OR mouse_idle < 3s):
       Pulses every 3.5s (and immediately within 0.25s when the mouse moves after a pause),
       keeping keyboard RTT at ~29ms so switching from mouse to keyboard has zero lag.
   - Tier 2 [SWEET-SPOT KEEP-ALIVE] (any_idle < sweet_spot_minutes [default 20m] AND display awake):
-      Pulses every 35s (well under the 150s factory disconnect timer) to prevent deep-sleep
-      disconnection while reading, watching videos, or thinking at the desk.
+      Pulses every 8.0s to prevent the firmware from entering Stage-1/Stage-2 sleep while
+      reading, watching videos, or thinking at the desk.
   - Tier 3 [DEEP-SLEEP RELEASE] (any_idle >= sweet_spot_minutes OR display asleep):
       Stops all pulses immediately so the keyboard naturally enters factory deep sleep (STATUS 719)
       after 2.5 minutes, consuming zero extra battery overnight or when away from the Mac.
@@ -170,8 +170,8 @@ def main():
                         help="Keep keyboard connected for N minutes after last user input (default: 20.0)")
     parser.add_argument("--hot-interval", type=float, default=3.5,
                         help="Heartbeat interval in seconds during active mouse/keyboard use (default: 3.5)")
-    parser.add_argument("--warm-interval", type=float, default=35.0,
-                        help="Heartbeat interval in seconds during passive reading within sweet-spot window (default: 35.0)")
+    parser.add_argument("--warm-interval", type=float, default=8.0,
+                        help="Heartbeat interval in seconds during passive reading within sweet-spot window (default: 8.0)")
     parser.add_argument("--once", action="store_true", help="Send a single heartbeat pulse and exit")
     args = parser.parse_args()
 
@@ -227,7 +227,7 @@ def main():
                     if ok and not was_connected:
                         print(f"[mi-ptkb-keepalive] keyboard reconnected & pre-warmed (rtt={rtt1:.1f}ms->{rtt2:.1f}ms)", flush=True)
                     was_connected = ok
-                    if new_tier != last_tier:
+                    if ok and new_tier != last_tier:
                         print(
                             f"[mi-ptkb-keepalive] -> {new_tier} (interval={target_interval}s, "
                             f"key_idle={key_idle:.1f}s, mouse_idle={mouse_idle:.1f}s, rtt={rtt1:.1f}ms->{rtt2:.1f}ms)",
